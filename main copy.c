@@ -1,12 +1,11 @@
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-double calculate_partial_numerator(int local_N, double *x, double *y, double **A) {
+double calculate_partial_numerator(int N, double *x, double *y, double **A) {
     double partial_sum = 0.0;
-    for (int i = 0; i < local_N; i++) {
-        for (int j = 0; j < local_N; j++) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
             partial_sum += x[i] * A[i][j] * y[j];
         }
     }
@@ -75,6 +74,11 @@ int main(int argc, char *argv[]) {
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
+MPI_Datatype matrix_type;
+    int N = 200; // Presupunem că dimensiunea este 200
+
+MPI_Type_contiguous(N * N, MPI_DOUBLE, &matrix_type);
+MPI_Type_commit(&matrix_type);
     MPI_Comm group_comm;
     int group = world_rank % 2;
 
@@ -86,78 +90,56 @@ int main(int argc, char *argv[]) {
 
     double *dataX = NULL, *dataY = NULL, **dataA = NULL;
     double my_partial_sum = 0.0, total_sum = 0.0;
-int N = 200; // Dimensiunea totala a datelor
-    int local_N = N / group_size; // Dimensiunea datelor per proces
 
-      dataX = (double*)malloc(local_N * sizeof(double));
-      dataY = (double*)malloc(local_N * sizeof(double));
-      dataA = (double**)malloc(local_N * sizeof(double*)); // Allocate for rows
-        for(int i = 0; i < local_N; i++) {
-        dataA[i] = (double*)malloc(N * sizeof(double)); // Allocate each row
-        }
-
-    if (group_rank == 0 && group == 0) {
-    // Citeste matricea A completa doar in procesul 0 din grupul 0
-    double **full_dataA = (double**)malloc(N * sizeof(double*));
-    for (int i = 0; i < N; i++) {
-        full_dataA[i] = (double*)malloc(N * sizeof(double));
-    }
-    read_matrix_from_file("mat.dat", full_dataA, N);
-    
-    // Distribuie segmente din A catre toate procesele din grupul 0
-    for (int i = 1; i < group_size; i++) {
-        for (int j = 0; j < local_N; j++) {
-            MPI_Send(full_dataA[j + (i * local_N)], local_N, MPI_DOUBLE, i, 0, group_comm);
-        }
-    }
-    
-    // Copiaza segmentul pentru procesul 0 din grupul 0
-    for (int i = 0; i < local_N; i++) {
-        memcpy(dataA[i], full_dataA[i], local_N * sizeof(double));
-    }
-    
-    // Eliberare memoria pentru matricea completa A
-    for (int i = 0; i < N; i++) {
-        free(full_dataA[i]);
-    }
-    free(full_dataA);
-} else if (group == 0) {
-    // Procesele non-zero din grupul 0 primesc segmentele lor din A
-    for (int i = 0; i < local_N; i++) {
-        MPI_Recv(dataA[i], local_N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
-    }
-}
-
-    // Procesul cu rank 0 in grup citeste si distribuie datele
     if (group_rank == 0) {
-        double *full_dataX = (double*)malloc(N * sizeof(double));
-        double *full_dataY = (double*)malloc(N * sizeof(double));
-        read_data_from_file("x.dat", full_dataX, N);
-        read_data_from_file("y.dat", full_dataY, N);
-        // Trimite jumatate din date catre fiecare proces din grup
-        for (int i = 1; i < group_size; i++) {
-            MPI_Send(&full_dataX[i * local_N], local_N, MPI_DOUBLE, i, 0, group_comm);
-            MPI_Send(&full_dataY[i * local_N], local_N, MPI_DOUBLE, i, 0, group_comm);
+        dataX = (double*)malloc(N * sizeof(double));
+        dataY = (double*)malloc(N * sizeof(double));
+        if (group == 0) {
+            dataA = (double**)malloc(N * sizeof(double*));
+            for (int i = 0; i < N; i++) {
+                dataA[i] = (double*)malloc(N * sizeof(double));
+            }
         }
-        // Copiaza datele pentru procesul 0
-        memcpy(dataX, full_dataX, local_N * sizeof(double));
-        memcpy(dataY, full_dataY, local_N * sizeof(double));
-        free(full_dataX);
-        free(full_dataY);
-        // Citeste si distribuie A daca este necesar
-       
+
+        // Presupunem că aceste funcții sunt implementate pentru a citi datele
+        read_data_from_file("x.dat", dataX, N);
+        read_data_from_file("y.dat", dataY, N);
+        if (group == 0) {
+            read_matrix_from_file("mat.dat", dataA, N);
+        }
+
+        for (int i = 1; i < group_size; i++) {
+            MPI_Send(dataX, N, MPI_DOUBLE, i, 0, group_comm);
+            MPI_Send(dataY, N, MPI_DOUBLE, i, 0, group_comm);
+            if (group == 0) {
+                // for (int j = 0; j < N; j++) {
+                //     MPI_Send(dataA[j], N, MPI_DOUBLE, i, 0, group_comm);
+                // }
+                  MPI_Send(dataA[0], 1, matrix_type, i, 0, group_comm);
+            }
+        }
     } else {
-        // Procesele non-zero primesc datele
-        MPI_Recv(dataX, local_N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
-        MPI_Recv(dataY, local_N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
-       
+        dataX = (double*)malloc(N * sizeof(double));
+        dataY = (double*)malloc(N * sizeof(double));
+        if (group == 0) {
+            dataA = (double**)malloc(N * sizeof(double*));
+            for (int i = 0; i < N; i++) {
+                dataA[i] = (double*)malloc(N * sizeof(double));
+            }
+        }
+
+        MPI_Recv(dataX, N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
+        MPI_Recv(dataY, N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
+        if (group == 0) {
+            // for (int i = 0; i < N; i++) {
+            //     MPI_Recv(dataA[i], N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
+            // }
+              MPI_Recv(dataA[0], 1, matrix_type, 0, 0, group_comm, MPI_STATUS_IGNORE);
+        }
     }
 
-    if (group == 0) {
-        my_partial_sum = calculate_partial_numerator(local_N, dataX, dataY, dataA);
-    } else {
-        my_partial_sum = calculate_partial_denominator(local_N, dataX, dataY);
-    }
+    my_partial_sum = (group == 0) ? calculate_partial_numerator(N, dataX, dataY, dataA) :
+                                    calculate_partial_denominator(N, dataX, dataY);
 
     MPI_Reduce(&my_partial_sum, &total_sum, 1, MPI_DOUBLE, MPI_SUM, 0, group_comm);
 
@@ -199,6 +181,7 @@ if (group_rank == 0) {
 double end = MPI_Wtime();
 printf("Durata: %f secunde\n", end - start);
     MPI_Comm_free(&group_comm);
+    MPI_Type_free(&matrix_type);
     MPI_Finalize();
     return 0;
 }
