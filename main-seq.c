@@ -64,6 +64,8 @@ int main() {
 
     // Verificăm dacă numitorul este diferit de zero înainte de a calcula AVG
     if (numitor != 0) {
+        printf("Numaratorul este: %lf\n", numarator);
+        printf("Numitorul este: %lf\n", numitor);
         double AVG = numarator / numitor;
         printf("Valoarea lui AVG este: %lf\n", AVG);
     } else {
