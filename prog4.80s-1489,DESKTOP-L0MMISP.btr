@@ -1,6 +1,0 @@
-
-prog4:1489 terminated with signal 11 at PC=555e87d5d72a SP=7fffb2c30540.  Backtrace:
-./prog4(+0x172a)[0x555e87d5d72a]
-/lib/x86_64-linux-gnu/libc.so.6(+0x29d90)[0x7f1c4d582d90]
-/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x80)[0x7f1c4d582e40]
-./prog4(+0x1245)[0x555e87d5d245]

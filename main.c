@@ -1,205 +1,233 @@
 #include <mpi.h>
+
 #include <stdio.h>
+
 #include <stdlib.h>
-#include <string.h>
 
-double calculate_partial_numerator(int local_N, double *x, double *y, double **A) {
-    double partial_sum = 0.0;
-    for (int i = 0; i < local_N; i++) {
-        for (int j = 0; j < local_N; j++) {
-            partial_sum += x[i] * A[i][j] * y[j];
+#define N 200
+
+void compute_nominator(double * sub_mat, double * sub_x_vec, double * sub_y_vec, int elements_per_proc, double * local_nominator) {
+    * local_nominator = 0.0;
+    for (int j = 0; j < N; j++) {
+        for (int i = 0; i < elements_per_proc; i++) {
+            * local_nominator += sub_x_vec[i] * sub_mat[i * N + j] * sub_y_vec[j];
         }
     }
-    return partial_sum;
 }
 
-// Funcția pentru calculul sumei parțiale pentru numitor
-double calculate_partial_denominator(int N, double *x, double *y) {
-    double partial_sum = 0.0;
-    for (int i = 0; i < N; i++) {
-        partial_sum += x[i] * y[i];
+void compute_denominator(double * sub_x_vec, double * sub_y_vec, int rows_per_proc, double * local_denominator) {
+    * local_denominator = 0.0;
+    for (int i = 0; i < rows_per_proc; i++) {
+        * local_denominator += sub_x_vec[i] * sub_y_vec[i];
     }
-    return partial_sum;
 }
 
-void read_data_from_file(const char *file_name, double *data, int size) {
-    FILE *file = fopen(file_name, "r");
-    if (!file) {
-        fprintf(stderr, "Eroare la deschiderea fisierului %s\n", file_name);
-        exit(EXIT_FAILURE);
-    }
 
-    for (int i = 0; i < size; i++) {
-        if (fscanf(file, "%lf\n", &data[i]) != 1) {
-            fprintf(stderr, "Eroare la citirea datelor din fisierul %s\n", file_name);
-            fclose(file);
-            exit(EXIT_FAILURE);
+void finalize_and_cleanup(int group, int group_rank, double *mat_data, double *vec_x_data, double *vec_y_data, double *sub_mat, double *sub_x_vec, double *sub_y_vec, MPI_Comm *group_comm) {
+    // Clean up dynamically allocated memory
+    if (group_rank == 0) {
+        if (group == 0) {
+            free(mat_data); // Free matrix data if it exists
+        }
+        free(vec_x_data); // Free x vector data
+        free(vec_y_data); // Free y vector data
+    }
+    if (group == 0) {
+        free(sub_mat); // Free sub matrix data if in group 0
+    }
+    free(sub_x_vec); // Free sub x vector data
+    free(sub_y_vec); // Free sub y vector data
+
+    // Free MPI communicator and finalize MPI
+    MPI_Comm_free(group_comm);
+    MPI_Finalize();
+}
+
+void send_results_to_master(int group_rank, int group, double global_nominator, double global_denominator, MPI_Comm comm) {
+    if (group_rank == 0) {
+        if (group == 0) {
+            MPI_Send(&global_nominator, 1, MPI_DOUBLE, 0, 28, comm);
+        } else if (group == 1) {
+            MPI_Send(&global_denominator, 1, MPI_DOUBLE, 0, 5, comm);
         }
     }
-
-    fclose(file);
 }
 
-// Functia pentru a citi matricea de date dintr-un fisier
-void read_matrix_from_file(const char *file_name, double **matrix, int size) {
-    FILE *file = fopen(file_name, "r");
-    if (!file) {
-        fprintf(stderr, "Eroare la deschiderea fisierului %s\n", file_name);
-        exit(EXIT_FAILURE);
+void receive_and_compute(int rank, MPI_Comm comm) {
+    if (rank == 0) {
+        MPI_Status status;
+        double nominator, denominator;
+
+        MPI_Recv(&nominator, 1, MPI_DOUBLE, MPI_ANY_SOURCE, 28, comm, &status);
+        MPI_Recv(&denominator, 1, MPI_DOUBLE, MPI_ANY_SOURCE, 5, comm, &status);
+
+        if (denominator != 0) {
+            printf("AVG: %f\n", nominator / denominator);
+        } else {
+            printf("Cannot compute average due to division by zero.\n");
+        }
+    }
+}
+
+void initialize_mpi_and_data(int argc, char **argv, int *rank, int *size, int *group, MPI_Comm *group_comm,
+                             int *group_rank, int *group_size, double **mat_data, double **vec_x_data, double **vec_y_data,
+                             double **sub_mat, double **sub_x_vec, double **sub_y_vec, int *rows_per_proc, int *elements_per_proc) {
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, rank);
+    MPI_Comm_size(MPI_COMM_WORLD, size);
+
+    int split_point = *size / 2;
+    *group = *rank < split_point ? 0 : 1;
+
+    MPI_Comm_split(MPI_COMM_WORLD, *group, *rank, group_comm);
+
+    MPI_Comm_rank(*group_comm, group_rank);
+    MPI_Comm_size(*group_comm, group_size);
+
+    *mat_data = NULL;
+    *vec_x_data = NULL;
+    *vec_y_data = NULL;
+    *sub_mat = NULL;
+    *sub_x_vec = NULL;
+    *sub_y_vec = NULL;
+
+    *rows_per_proc = N / *group_size;
+    *elements_per_proc = N / *group_size;
+}
+
+void initialize_matrix(int group, int group_rank, MPI_Comm group_comm, double **mat_data, double **sub_mat, int rows_per_proc) {
+    if (group == 0) {
+        // Allocate memory for the entire matrix only in group 0
+        *mat_data = (double *) malloc(N * N * sizeof(double));
+        if (*mat_data == NULL) {
+            fprintf(stderr, "Failed to allocate memory for matrix data.\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+
+        if (group_rank == 0) {
+            // Load matrix data from file only at the leader of group 0
+            FILE *file_mat = fopen("mat.dat", "r");
+            if (!file_mat) {
+                fprintf(stderr, "Error opening file for matrix.\n");
+                MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            }
+            for (int i = 0; i < N * N; i++) {
+                if (fscanf(file_mat, "%lf", &(*mat_data)[i]) != 1) {
+                    fprintf(stderr, "Error reading matrix data from file.\n");
+                    fclose(file_mat);
+                    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+                }
+            }
+            fclose(file_mat);
+        }
+
+        // Allocate memory for the sub-matrix that each process will handle
+        *sub_mat = (double *) malloc(rows_per_proc * N * sizeof(double));
+        if (*sub_mat == NULL) {
+            fprintf(stderr, "Failed to allocate memory for sub-matrix data.\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+
+        // Scatter the matrix data across processes in group 0
+        MPI_Scatter(*mat_data, rows_per_proc * N, MPI_DOUBLE, *sub_mat, rows_per_proc * N, MPI_DOUBLE, 0, group_comm);
+    }
+}
+
+void initialize_vectors(int group, int group_rank, MPI_Comm group_comm, int elements_per_proc,
+                        double **vec_x_data, double **vec_y_data, double **sub_x_vec, double **sub_y_vec) {
+    // Allocate memory for vectors
+    *vec_x_data = (double *) malloc(N * sizeof(double));
+    *vec_y_data = (double *) malloc(N * sizeof(double));
+    if (*vec_x_data == NULL || *vec_y_data == NULL) {
+        fprintf(stderr, "Failed to allocate memory for vectors.\n");
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
-    for (int i = 0; i < size; i++) {
-        for (int j = 0; j < size; j++) {
-            if (fscanf(file, "%lf", &matrix[i][j]) != 1) {
-                fprintf(stderr, "Eroare la citirea datelor din fisierul %s\n", file_name);
-                fclose(file);
-                exit(EXIT_FAILURE);
+    if (group_rank == 0) {
+        // Load vector data from files only at the leader of group 0
+        FILE *file_x_vec = fopen("x.dat", "r");
+        FILE *file_y_vec = fopen("y.dat", "r");
+        if (!file_x_vec || !file_y_vec) {
+            fprintf(stderr, "Error opening files for vectors.\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+        for (int i = 0; i < N; i++) {
+            if (fscanf(file_x_vec, "%lf", &(*vec_x_data)[i]) != 1 || fscanf(file_y_vec, "%lf", &(*vec_y_data)[i]) != 1) {
+                fprintf(stderr, "Error reading vector data from files.\n");
+                fclose(file_x_vec);
+                fclose(file_y_vec);
+                MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
             }
         }
+        fclose(file_x_vec);
+        fclose(file_y_vec);
     }
 
-    fclose(file);
+    // Allocate memory for sub-vectors that each process will handle
+    *sub_x_vec = (double *) malloc(elements_per_proc * sizeof(double));
+    if (*sub_x_vec == NULL) {
+        fprintf(stderr, "Failed to allocate memory for sub-vector X.\n");
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+
+    // Scatter the x vector data across all processes
+    MPI_Scatter(*vec_x_data, elements_per_proc, MPI_DOUBLE, *sub_x_vec, elements_per_proc, MPI_DOUBLE, 0, group_comm);
+
+    // Handle y vector based on the group
+    if (group == 0) {
+        // Broadcast y vector data within group 0
+        MPI_Bcast(*vec_y_data, N, MPI_DOUBLE, 0, group_comm);
+    } else if (group == 1) {
+        // Allocate and scatter y vector data within group 1
+        *sub_y_vec = (double *) malloc(elements_per_proc * sizeof(double));
+        if (*sub_y_vec == NULL) {
+            fprintf(stderr, "Failed to allocate memory for sub-vector Y.\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+        MPI_Scatter(*vec_y_data, elements_per_proc, MPI_DOUBLE, *sub_y_vec, elements_per_proc, MPI_DOUBLE, 0, group_comm);
+    }
 }
 
-
-
-int main(int argc, char *argv[]) {
-    MPI_Init(&argc, &argv);
-    double start = MPI_Wtime();
-    int world_rank, world_size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-
-    if (world_size < 2) {
-        fprintf(stderr, "Sunt necesare cel puțin 2 procese.\n");
-        MPI_Abort(MPI_COMM_WORLD, 1);
-    }
-
+int main(int argc, char * argv[]) {
+    int rank, size, group;
     MPI_Comm group_comm;
-    int group = world_rank % 2;
-
-    MPI_Comm_split(MPI_COMM_WORLD, group, world_rank, &group_comm);
-
     int group_rank, group_size;
-    MPI_Comm_rank(group_comm, &group_rank);
-    MPI_Comm_size(group_comm, &group_size);
+    double *mat_data, *vec_x_data, *vec_y_data;
+    double *sub_mat, *sub_x_vec, *sub_y_vec;
+    int rows_per_proc, elements_per_proc;
 
-    double *dataX = NULL, *dataY = NULL, **dataA = NULL;
-    double my_partial_sum = 0.0, total_sum = 0.0;
-int N = 200; // Dimensiunea totala a datelor
-    int local_N = N / group_size; // Dimensiunea datelor per proces
+    // Initialize MPI and data
+    initialize_mpi_and_data(argc, argv, &rank, &size, &group, &group_comm, &group_rank, &group_size,
+                            &mat_data, &vec_x_data, &vec_y_data, &sub_mat, &sub_x_vec, &sub_y_vec,
+                            &rows_per_proc, &elements_per_proc);
+    double start_time = MPI_Wtime();
 
-      dataX = (double*)malloc(local_N * sizeof(double));
-      dataY = (double*)malloc(local_N * sizeof(double));
-      dataA = (double**)malloc(local_N * sizeof(double*)); // Allocate for rows
-        for(int i = 0; i < local_N; i++) {
-        dataA[i] = (double*)malloc(N * sizeof(double)); // Allocate each row
-        }
+   initialize_matrix(group, group_rank, group_comm, &mat_data, &sub_mat, rows_per_proc);
 
-    if (group_rank == 0 && group == 0) {
-    // Citeste matricea A completa doar in procesul 0 din grupul 0
-    double **full_dataA = (double**)malloc(N * sizeof(double*));
-    for (int i = 0; i < N; i++) {
-        full_dataA[i] = (double*)malloc(N * sizeof(double));
-    }
-    read_matrix_from_file("mat.dat", full_dataA, N);
-    
-    // Distribuie segmente din A catre toate procesele din grupul 0
-    for (int i = 1; i < group_size; i++) {
-        for (int j = 0; j < local_N; j++) {
-            MPI_Send(full_dataA[j + (i * local_N)], local_N, MPI_DOUBLE, i, 0, group_comm);
-        }
-    }
-    
-    // Copiaza segmentul pentru procesul 0 din grupul 0
-    for (int i = 0; i < local_N; i++) {
-        memcpy(dataA[i], full_dataA[i], local_N * sizeof(double));
-    }
-    
-    // Eliberare memoria pentru matricea completa A
-    for (int i = 0; i < N; i++) {
-        free(full_dataA[i]);
-    }
-    free(full_dataA);
-} else if (group == 0) {
-    // Procesele non-zero din grupul 0 primesc segmentele lor din A
-    for (int i = 0; i < local_N; i++) {
-        MPI_Recv(dataA[i], local_N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
-    }
-}
+    initialize_vectors(group, group_rank, group_comm, elements_per_proc, &vec_x_data, &vec_y_data, &sub_x_vec, &sub_y_vec);
 
-    // Procesul cu rank 0 in grup citeste si distribuie datele
-    if (group_rank == 0) {
-        double *full_dataX = (double*)malloc(N * sizeof(double));
-        double *full_dataY = (double*)malloc(N * sizeof(double));
-        read_data_from_file("x.dat", full_dataX, N);
-        read_data_from_file("y.dat", full_dataY, N);
-        // Trimite jumatate din date catre fiecare proces din grup
-        for (int i = 1; i < group_size; i++) {
-            MPI_Send(&full_dataX[i * local_N], local_N, MPI_DOUBLE, i, 0, group_comm);
-            MPI_Send(&full_dataY[i * local_N], local_N, MPI_DOUBLE, i, 0, group_comm);
-        }
-        // Copiaza datele pentru procesul 0
-        memcpy(dataX, full_dataX, local_N * sizeof(double));
-        memcpy(dataY, full_dataY, local_N * sizeof(double));
-        free(full_dataX);
-        free(full_dataY);
-        // Citeste si distribuie A daca este necesar
-       
-    } else {
-        // Procesele non-zero primesc datele
-        MPI_Recv(dataX, local_N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
-        MPI_Recv(dataY, local_N, MPI_DOUBLE, 0, 0, group_comm, MPI_STATUS_IGNORE);
-       
-    }
-
+    double global_nominator = 0.0, global_denominator = 0.0;
     if (group == 0) {
-        my_partial_sum = calculate_partial_numerator(local_N, dataX, dataY, dataA);
-    } else {
-        my_partial_sum = calculate_partial_denominator(local_N, dataX, dataY);
+        double local_nominator = 0.0;
+        compute_nominator(sub_mat, sub_x_vec, vec_y_data, elements_per_proc, & local_nominator);
+        MPI_Reduce( & local_nominator, & global_nominator, 1, MPI_DOUBLE, MPI_SUM, 0, group_comm);
+    } else if (group == 1) {
+        double local_denominator = 0.0;
+        compute_denominator(sub_x_vec, sub_y_vec, rows_per_proc, & local_denominator);
+        MPI_Reduce( & local_denominator, & global_denominator, 1, MPI_DOUBLE, MPI_SUM, 0, group_comm);
     }
 
-    MPI_Reduce(&my_partial_sum, &total_sum, 1, MPI_DOUBLE, MPI_SUM, 0, group_comm);
+    // Sending part
+send_results_to_master(group_rank, group, global_nominator, global_denominator, MPI_COMM_WORLD);
 
-  double numerator_total = 0.0, denominator_total = 0.0;
+// Receiving and computing part
+receive_and_compute(rank, MPI_COMM_WORLD);
 
-if (group_rank == 0) {
-    if (world_rank == 0) {
-        // Procesul cu rank 0 global primește sumele de la ambele grupuri
-        if (group == 0) {
-            numerator_total = total_sum; // Aceasta este suma totală a numărătorului
-            MPI_Recv(&denominator_total, 1, MPI_DOUBLE, 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        } else {
-            denominator_total = total_sum; // Aceasta este suma totală a numitorului
-            MPI_Recv(&numerator_total, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        }
+ double end_time = MPI_Wtime();
 
-        // Calculăm AVG
-        if (denominator_total != 0) {
-            double AVG = numerator_total / denominator_total;
-            printf("Valoarea AVG este: %f\n", AVG);
-        } else {
-            fprintf(stderr, "Eroare: Numitorul este zero.\n");
-        }
-    } else {
-        // Procesele cu rank 0 din fiecare grup trimit suma totală la procesul cu rank 0 global
-        MPI_Send(&total_sum, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-    }
-}
-
-    // Eliberarea memoriei
-    free(dataX);
-    free(dataY);
-    if (group == 0) {
-        for (int i = 0; i < N; i++) {
-            free(dataA[i]);
-        }
-        free(dataA);
-    }
-double end = MPI_Wtime();
-printf("Durata: %f secunde\n", end - start);
-    MPI_Comm_free(&group_comm);
-    MPI_Finalize();
+    // Calculul și afișarea duratei
+    double elapsed_time = end_time - start_time;
+    printf("Elapsed time: %f seconds\n", elapsed_time);
+  finalize_and_cleanup(group, group_rank, mat_data, vec_x_data, vec_y_data, sub_mat, sub_x_vec, sub_y_vec, &group_comm);
     return 0;
 }
-
